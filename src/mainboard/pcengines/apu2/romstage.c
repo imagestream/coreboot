@@ -117,21 +117,6 @@ void cache_as_ram_main(unsigned long bist, unsigned long cpu_init_detectedx)
 			print_sign_of_life();
 		}
 
-		if ((check_mpcie2_clk() || CONFIG(FORCE_MPCIE2_CLK)) &&
-		     CONFIG(BOARD_PCENGINES_APU2)) {
-			// make GFXCLK to ignore CLKREQ# input
-			// force it to be always on
-			data = read32((const volatile void *)
-				      (ACPI_MMIO_BASE + MISC_BASE +
-				       FCH_MISC_REG04));
-			data &= 0xFFFFFF0F;
-			data |= 0xF << (1 * 4); // CLKREQ GFX to GFXCLK
-			write32((volatile void *)
-				(ACPI_MMIO_BASE + MISC_BASE + FCH_MISC_REG04),
-				 data);
-			printk(BIOS_DEBUG, "force mPCIe clock enabled\n");
-		}
-
 		volatile u32 *ptr = (u32 *)(ACPI_MMIO_BASE + WATCHDOG_BASE);
 		u16 watchdog_timeout = get_watchdog_timeout();
 
