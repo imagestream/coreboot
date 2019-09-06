@@ -154,4 +154,7 @@ config RO_REGION_ONLY
 	string
 	default "spd.bin AGESA" if VBOOT
 
+config VPD
+	select AMDFW_OUTSIDE_CBFS
+
 endif # BOARD_PCENGINES_APU2
