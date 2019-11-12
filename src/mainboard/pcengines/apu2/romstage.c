@@ -21,8 +21,10 @@
 #include <device/pci_ops.h>
 #include <device/pnp.h>
 #include <arch/cpu.h>
+#include <delay.h>
 #include <cpu/x86/lapic.h>
 #include <console/console.h>
+#include <console/uart.h>
 #include <timestamp.h>
 #include <cpu/amd/car.h>
 #include <device/pnp.h>
@@ -48,6 +50,7 @@
 
 static void early_lpc_init(void);
 static void print_sign_of_life(void);
+static void lpc_mcu_msg(void);
 extern char coreboot_dmi_date[];
 extern char coreboot_version[];
 
@@ -115,6 +118,7 @@ void cache_as_ram_main(unsigned long bist, unsigned long cpu_init_detectedx)
 		if (check_console() &&
 		    !(data & FCH_PMIOxC0_S5ResetStatus_All_Status)) {
 			print_sign_of_life();
+			lpc_mcu_msg();
 		}
 
 		if ((check_mpcie2_clk() || CONFIG(FORCE_MPCIE2_CLK)) &&
@@ -283,4 +287,66 @@ static void print_sign_of_life()
 	                   CONFIG_MAINBOARD_PART_NUMBER "\n");
 	printk(BIOS_ALERT, "coreboot build %s\n", tmp);
 	printk(BIOS_ALERT, "BIOS version %s\n", mainboard_bios_version());
+}
+
+
+static void lpc_mcu_msg(void)
+{
+	unsigned int i, timeout;
+	const char *post_msg = "BIOSBOOT";
+	unsigned char sync_byte = 0;
+
+	if (!CONFIG(BOARD_PCENGINES_APU5))
+		return;
+
+	nuvoton_enable_serial(SERIAL2_DEV, 0x2f8);
+
+	uart_init(1);
+
+	for (i = 0; i < 4; i++) {
+		uart_tx_byte(1, 0xE1);
+		uart_tx_flush(1);
+		timeout = 10;
+		while (sync_byte != 0xE1) {
+			sync_byte = uart_rx_byte(1);
+			if (timeout == 0) {
+				uart_init(CONFIG_UART_FOR_CONSOLE);
+				udelay(10000);
+				printk(BIOS_EMERG, "Failed to sync with LPC"
+				       " MCU, number of retries %d\n", 3 - i);
+				udelay(10000);
+				uart_init(1);
+				udelay(10000);
+				break;
+			}
+			udelay(100);
+			timeout--;
+		}
+		if (sync_byte == 0xE1)
+			break;
+	}
+
+	if (sync_byte != 0xE1)
+		return;
+
+	uart_init(1);
+	timeout = 10;
+
+	for (i = 0; i < strlen(post_msg); i++)
+		uart_tx_byte(1, *(post_msg + i));
+
+	uart_tx_byte(1, 0xE1);
+	uart_tx_flush(1);
+
+	while (uart_rx_byte(1) != 0xE1) {
+		if (timeout == 0) {
+			uart_init(CONFIG_UART_FOR_CONSOLE);
+			printk(BIOS_EMERG, "Did not receive response to BIOSBOOT\n");
+			return;
+		}
+		udelay(100);
+		timeout--;
+	}
+
+	uart_init(CONFIG_UART_FOR_CONSOLE);
 }
