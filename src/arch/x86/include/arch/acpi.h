@@ -300,6 +300,60 @@ typedef struct acpi_ivrs {
 	struct acpi_ivrs_ivhd ivhd;
 } __packed acpi_ivrs_t;
 
+/* IVHD (I/O Virtualization Hardware Definition Block) 4-byte entry */
+typedef struct ivrs_ivhd_generic {
+	uint8_t type;
+	uint16_t dev_id;
+	uint8_t dte_setting;
+} __packed ivrs_ivhd_generic_t;
+
+enum ivhd_generic_type {
+	IVHD_GENERIC_RESERVED = 0,
+	IVHD_GENERIC_ALL = 1,
+	IVHD_GENERIC_SELECT = 2,
+	IVHD_GENERIC_START_OF_RANGE = 3,
+	IVHD_GENERIC_END_OF_RANGE =4
+};
+
+/* IVHD (I/O Virtualization Hardware Definition Block) 8-byte entries */
+typedef struct ivrs_ivhd_alias {
+	uint8_t type;
+	uint16_t dev_id;
+	uint8_t dte_setting;
+	uint8_t reserved1;
+	uint16_t source_dev_id;
+	uint8_t reserved2;
+} __packed ivrs_ivhd_alias_t;
+
+typedef struct ivrs_ivhd_extended {
+	uint8_t type;
+	uint16_t dev_id;
+	uint8_t dte_setting;
+	uint32_t extended_dte_setting;
+} __packed ivrs_ivhd_extended_t;
+
+typedef struct ivrs_ivhd_special {
+	uint8_t type;
+	uint16_t reserved;
+	uint8_t dte_setting;
+	uint8_t handle;
+	uint16_t source_dev_id;
+	uint8_t variety;
+} __packed ivrs_ivhd_special_t;
+
+enum ivhd_extended_type {
+	IVHD_ALIAS_SELECT = 0x42,
+	IVHD_ALIAST_START_OF_RANGE = 0x43,
+	IVHD_EXTENDED_SELECT = 0x46,
+	IVHD_EXTENDED_START_OF_RANGE = 0x47,
+	IVHD_SPECIAL_DEVICE = 0x48
+};
+
+enum ivhd_special_device_variety {
+	IVHD_VARIETY_IOAPIC = 0x01,
+	IVHD_VARIETY_HPET = 0x02
+};
+
 enum dev_scope_type {
 	SCOPE_PCI_ENDPOINT = 1,
 	SCOPE_PCI_SUB = 2,
