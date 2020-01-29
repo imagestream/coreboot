@@ -19,6 +19,7 @@
 #include <device/pci_ops.h>
 #include <arch/acpi.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <device/device.h>
 #include <device/pci.h>
 #include <device/pci_ids.h>
@@ -41,6 +42,7 @@
 #include <northbridge/amd/pi/agesawrapper.h>
 #include <northbridge/amd/pi/agesawrapper_call.h>
 #endif
+#include <southbridge/amd/pi/hudson/pci_devs.h>
 
 #define MAX_NODE_NUMS MAX_NODES
 
@@ -437,59 +439,169 @@ static unsigned long acpi_fill_hest(acpi_hest_t *hest)
 	return (unsigned long)current;
 }
 
+unsigned long acpi_fill_ivrs_ioapic(acpi_ivrs_t *ivrs, unsigned long current)
+{
+	/*
+	 * FIXME: 8-byte IVHD structures seem to be aligned to the 8-byte
+	 * boundary in AGESA but IOMMU specification doesn't explicitly say to
+	 * do so. Only 4-byte IVHDs should be aligned to a 4-byte boundary
+	 */
+	unsigned long offset = ((current + 0x7) & (~ 0x7)) - current;
+	ivrs_ivhd_special_t *ivhd_ioapic =
+		(ivrs_ivhd_special_t *)(current + offset);
+
+	ivhd_ioapic->type = IVHD_SPECIAL_DEVICE;
+	ivhd_ioapic->reserved = 0x0000;
+	ivhd_ioapic->dte_setting = 0xd7; /* Allow all interrupts */
+	ivhd_ioapic->handle = CONFIG_MAX_CPUS; /* FCH IOAPIC ID */
+	ivhd_ioapic->source_dev_id = PCI_DEVFN(SMBUS_DEV, SMBUS_FUNC);
+	ivhd_ioapic->variety = IVHD_VARIETY_IOAPIC;
+	current += sizeof(ivrs_ivhd_special_t) + offset;
+	ivrs->ivhd.length += sizeof(ivrs_ivhd_special_t) + offset;
+
+	ivhd_ioapic = (ivrs_ivhd_special_t *)current;
+
+	ivhd_ioapic->type = IVHD_SPECIAL_DEVICE;
+	ivhd_ioapic->reserved = 0x0000;
+	ivhd_ioapic->dte_setting = 0x00;
+	ivhd_ioapic->handle = CONFIG_MAX_CPUS + 1; /* GNB IOAPIC ID */
+	/*
+	 * GNB IOAPIC on Root Complex.
+	 * This device ID is requested by IOMMU drivers on most systems
+	 * although it is not described in any documentation.
+	 */
+	ivhd_ioapic->source_dev_id = PCI_DEVFN(0, 1);
+	ivhd_ioapic->variety = IVHD_VARIETY_IOAPIC;
+	current += sizeof(ivrs_ivhd_special_t);
+	ivrs->ivhd.length += sizeof(ivrs_ivhd_special_t);
+
+	return current;
+}
+
+static unsigned long ivhd_describe_hpet(acpi_ivrs_t *ivrs, unsigned long current)
+{
+	/*
+	 * FIXME: 8-byte IVHD structures seem to be aligned to the 8-byte
+	 * boundary in AGESA but IOMMU specification doesn't explicitly say to
+	 * do so. Only 4-byte IVHDs should be aligned to a 4-byte boundary
+	 */
+	unsigned long offset = ((current + 0x7) & (~ 0x7)) - current;
+	ivrs_ivhd_special_t *ivhd_hpet =
+		 (ivrs_ivhd_special_t *)(current + offset);
+
+	ivhd_hpet->type = IVHD_SPECIAL_DEVICE;
+	ivhd_hpet->reserved = 0x0000;
+	ivhd_hpet->dte_setting = 0x00;
+	ivhd_hpet->handle = 0x00;
+	ivhd_hpet->source_dev_id = PCI_DEVFN(SMBUS_DEV, SMBUS_FUNC);
+	ivhd_hpet->variety = IVHD_VARIETY_HPET;
+	current += sizeof(ivrs_ivhd_special_t) + offset;
+	ivrs->ivhd.length += sizeof(ivrs_ivhd_special_t) + offset;
+
+	return current;
+}
+
+static unsigned long ivhd_generic_range(acpi_ivrs_t *ivrs,
+					unsigned long current,
+					uint16_t start_devid,
+					uint16_t end_devid, uint8_t setting)
+{
+	ivrs_ivhd_generic_t *ivhd_range = (ivrs_ivhd_generic_t *)current;
+
+	/* create the start range IVHD entry */
+	ivhd_range->type = IVHD_GENERIC_START_OF_RANGE;
+	ivhd_range->dev_id = start_devid;
+	ivhd_range->dte_setting = setting;
+	current += sizeof (ivrs_ivhd_generic_t);
+	ivrs->ivhd.length += sizeof (ivrs_ivhd_generic_t);
+
+	/* create the end range IVHD entry */
+	ivhd_range = (ivrs_ivhd_generic_t *)current;
+	ivhd_range->type = IVHD_GENERIC_END_OF_RANGE;
+	ivhd_range->dev_id = end_devid;
+	ivhd_range->dte_setting = setting;
+	current += sizeof (ivrs_ivhd_generic_t);
+	ivrs->ivhd.length += sizeof (ivrs_ivhd_generic_t);
+
+	return current;
+}
+
 static void add_ivhd_dev_entry(struct device *parent, struct device *dev,
 			       unsigned long *current, uint16_t *length,
 			       uint8_t type, uint8_t data)
 {
-	uint8_t *p;
-	p = (uint8_t *) *current;
+	unsigned long offset;
 
-	if (type == 0x2) {
-		/* Entry type */
-		p[0] = type;
-		/* Device */
-		p[1] = dev->path.pci.devfn;
-		/* Bus */
-		p[2] = dev->bus->secondary;
-		/* Data */
-		p[3] = data;
-		/* [4:7] Padding */
-		p[4] = 0x0;
-		p[5] = 0x0;
-		p[6] = 0x0;
-		p[7] = 0x0;
-		*length += 8;
-		*current += 8;
-	} else if (type == 0x42) {
-		/* Entry type */
-		p[0] = type;
-		/* Device */
-		p[1] = dev->path.pci.devfn;
-		/* Bus */
-		p[2] = dev->bus->secondary;
-		/* Data */
-		p[3] = 0x0;
-		/* Reserved */
-		p[4] = 0x0;
-		/* Device */
-		p[5] = parent->path.pci.devfn;
-		/* Bus */
-		p[6] = parent->bus->secondary;
-		/* Reserved */
-		p[7] = 0x0;
-		*length += 8;
-		*current += 8;
+	if (type == IVHD_GENERIC_SELECT) {
+		offset = ((*current + 0x3) & (~ 0x3)) - *current;
+		ivrs_ivhd_generic_t *ivhd_entry = (ivrs_ivhd_generic_t *)(*current + offset);
+
+		ivhd_entry->type = type;
+		ivhd_entry->dev_id = dev->path.pci.devfn | (dev->bus->secondary << 8);
+		ivhd_entry->dte_setting = data;
+
+		*current += sizeof(ivrs_ivhd_generic_t) + offset;
+		*length  += sizeof(ivrs_ivhd_generic_t) + offset;
+		printk(BIOS_DEBUG, "IVHD type 2, devfn %d, bus %d \n", dev->path.pci.devfn, dev->bus->secondary);
+	} else if (type == IVHD_ALIAS_SELECT) {
+		offset = ((*current + 0x7) & (~ 0x7)) - *current;
+		ivrs_ivhd_alias_t *ivhd_entry = (ivrs_ivhd_alias_t *)(*current + offset);
+
+		ivhd_entry->type = type;
+		ivhd_entry->dev_id = dev->path.pci.devfn | (dev->bus->secondary << 8);
+		ivhd_entry->dte_setting = data;
+		ivhd_entry->reserved1 = 0;
+		ivhd_entry->reserved2 = 0;
+		ivhd_entry->source_dev_id = parent->path.pci.devfn | (parent->bus->secondary << 8);
+
+		*current += sizeof(ivrs_ivhd_alias_t) + offset;
+		*length  += sizeof(ivrs_ivhd_alias_t) + offset;
+		printk(BIOS_DEBUG, "IVHD type 42, devfn %d, bus %d ,"
+			" parent devfn %d, parent bus %d \n", dev->path.pci.devfn, dev->bus->secondary,
+			parent->path.pci.devfn, parent->bus->secondary);
 	}
 }
 
-static void add_ivrs_device_entries(struct device *parent, struct device *dev,
+static void ivrs_add_device_or_bridge(struct device *parent, struct device *dev,
+				      unsigned long *current, uint16_t *length)
+{
+	unsigned int header_type, is_pcie, dev_type;
+
+	header_type = dev->hdr_type & 0x7f;
+	is_pcie = pci_find_capability(dev, PCI_CAP_ID_PCIE);
+
+	if (((header_type == PCI_HEADER_TYPE_NORMAL) ||
+	     (header_type == PCI_HEADER_TYPE_BRIDGE)) && is_pcie) {
+		/* Device or Bridge is PCIe.
+		 * FIXME: if the endpoint is legacy, OS can configure
+		 * it for INTx use which breaks interrupt delivery for
+		 * this device when IOMMU is on and device is described
+		 * by type 2 entry. Such devices should be described by
+		 * type 0x42 alias entry and point to the upstream port
+		 * DeviceID as a source of bus transactions.
+		 */
+		dev_type = (pci_read_config16(dev, is_pcie + 2) & PCI_EXP_FLAGS_TYPE) >> 4;
+		if (dev_type & PCI_EXP_TYPE_LEG_END)
+			add_ivhd_dev_entry(parent, dev, current, length, IVHD_ALIAS_SELECT, 0x0);
+		else
+			add_ivhd_dev_entry(parent, dev, current, length, IVHD_GENERIC_SELECT, 0x0);
+	} else if ((header_type == PCI_HEADER_TYPE_NORMAL) && !is_pcie) {
+		/* Device is legacy PCI or PCI-X */
+		add_ivhd_dev_entry(parent, dev, current, length, IVHD_ALIAS_SELECT, 0x0);
+	}
+}
+
+static void add_ivhd_device_entries(struct device *parent, struct device *dev,
 				    unsigned int depth, int linknum, int8_t *root_level,
 				    unsigned long *current, uint16_t *length)
 {
 	struct device *sibling;
 	struct bus *link;
-	unsigned int header_type;
-	unsigned int is_pcie;
+
+	if (!root_level) {
+		root_level = malloc(sizeof(int8_t));
+		*root_level = -1;
+	}
 
 	if (dev->path.type == DEVICE_PATH_PCI) {
 
@@ -498,30 +610,8 @@ static void add_ivrs_device_entries(struct device *parent, struct device *dev,
 			*root_level = depth;
 
 		if ((*root_level != -1) && (dev->enabled)) {
-			if (depth == *root_level) {
-				if (dev->path.pci.devfn == (0x14 << 3)) {
-					/* SMBUS controller */
-					add_ivhd_dev_entry(parent, dev, current, length, 0x2, 0x97);
-				} else if (dev->path.pci.devfn != 0x2 &&
-					   dev->path.pci.devfn < (0x2 << 3)) {
-					/* FCH control device */
-				} else {
-					/* Other devices */
-					add_ivhd_dev_entry(parent, dev, current, length, 0x2, 0x0);
-				}
-			} else {
-				header_type = dev->hdr_type & 0x7f;
-				is_pcie = pci_find_capability(dev, PCI_CAP_ID_PCIE);
-				if (((header_type == PCI_HEADER_TYPE_NORMAL) ||
-				     (header_type == PCI_HEADER_TYPE_BRIDGE))
-				    && is_pcie) {
-					/* Device or Bridge is PCIe */
-					add_ivhd_dev_entry(parent, dev, current, length, 0x2, 0x0);
-				} else if ((header_type == PCI_HEADER_TYPE_NORMAL) &&
-					   !is_pcie) {
-					add_ivhd_dev_entry(parent, dev, current, length, 0x42, 0x0);
-					/* Device is legacy PCI or PCI-X */
-				}
+			if (depth != *root_level) {
+				ivrs_add_device_or_bridge(parent, dev, current, length);
 			}
 		}
 	}
@@ -529,50 +619,14 @@ static void add_ivrs_device_entries(struct device *parent, struct device *dev,
 	for (link = dev->link_list; link; link = link->next)
 		for (sibling = link->children; sibling; sibling =
 		     sibling->sibling)
-			add_ivrs_device_entries(dev, sibling, depth + 1, depth,
+			add_ivhd_device_entries(dev, sibling, depth + 1, depth,
 						root_level, current, length);
-}
 
-unsigned long acpi_fill_ivrs_ioapic(acpi_ivrs_t *ivrs, unsigned long current)
-{
-	uint8_t *p;
-
-	uint32_t apicid_sb800;
-	uint32_t apicid_northbridge;
-
-	apicid_sb800 = CONFIG_MAX_CPUS;
-	apicid_northbridge = CONFIG_MAX_CPUS + 1;
-
-	/* Describe NB IOAPIC */
-	p = (uint8_t *)current;
-	p[0] = 0x48;                    /* Entry type */
-	p[1] = 0;                       /* Device */
-	p[2] = 0;                       /* Bus */
-	p[3] = 0x0;                     /* Data */
-	p[4] = apicid_northbridge;      /* IOAPIC ID */
-	p[5] = 0x0;                     /* Device 0 Function 0 */
-	p[6] = 0x0;                     /* Northbridge bus */
-	p[7] = 0x1;                     /* Variety */
-	current += 8;
-
-	/* Describe SB IOAPIC */
-	p = (uint8_t *)current;
-	p[0] = 0x48;                    /* Entry type */
-	p[1] = 0;                       /* Device */
-	p[2] = 0;                       /* Bus */
-	p[3] = 0xd7;                    /* Data */
-	p[4] = apicid_sb800;            /* IOAPIC ID */
-	p[5] = 0x14 << 3;               /* Device 0x14 Function 0 */
-	p[6] = 0x0;                     /* Southbridge bus */
-	p[7] = 0x1;                     /* Variety */
-	current += 8;
-
-	return current;
+	free(root_level);
 }
 
 static unsigned long acpi_fill_ivrs(acpi_ivrs_t *ivrs, unsigned long current)
 {
-	uint8_t *p;
 	acpi_ivrs_t *ivrs_agesa;
 
 	struct device *nb_dev = pcidev_on_root(0x0, 0);
@@ -584,66 +638,47 @@ static unsigned long acpi_fill_ivrs(acpi_ivrs_t *ivrs, unsigned long current)
 		return (unsigned long)ivrs;
 	}
 
-
 	/* obtain IOMMU base address */
 	ivrs_agesa = agesawrapper_getlateinitptr(PICK_IVRS);
 	if (ivrs_agesa != NULL) {
-		ivrs->iv_info = 0x0;
-		/* Maximum supported virtual address size */
-		ivrs->iv_info |= (0x40 << 15);
-		/* Maximum supported physical address size */
-		ivrs->iv_info |= (0x30 << 8);
-		/* Guest virtual address width */
-		ivrs->iv_info |= (0x2 << 5);
-
+		/* Enable EFR */
+		ivrs->iv_info = ivrs_agesa->iv_info | 1;
 		ivrs->ivhd.type = 0x10;
-		ivrs->ivhd.flags = 0x0e;
-		/* Enable ATS support */
-		ivrs->ivhd.flags |= 0x10;
+		ivrs->ivhd.flags = ivrs_agesa->ivhd.flags;
 		ivrs->ivhd.length = sizeof(struct acpi_ivrs_ivhd);
 		/* BDF <bus>:00.2 */
-		ivrs->ivhd.device_id = 0x2 | (nb_dev->bus->secondary << 8);
-		/* Capability block 0x40 (type 0xf, "Secure device") */
+		ivrs->ivhd.device_id = 0x02 | (nb_dev->bus->secondary << 8);
+		/* PCI Capability block 0x40 (type 0xf, "Secure device") */
 		ivrs->ivhd.capability_offset = 0x40;
 		ivrs->ivhd.iommu_base_low = ivrs_agesa->ivhd.iommu_base_low;
 		ivrs->ivhd.iommu_base_high = ivrs_agesa->ivhd.iommu_base_high;
-		ivrs->ivhd.pci_segment_group = 0x0;
-		ivrs->ivhd.iommu_info = 0x0;
-		ivrs->ivhd.iommu_info |= (0x13 << 8);
-		/* use only performance counters related bits:
-		 * PNCounters[16:13] and
-		 * PNBanks[22:17],
-		 * otherwise 0 */
+		ivrs->ivhd.pci_segment_group = 0x0000;
+		ivrs->ivhd.iommu_info = ivrs_agesa->ivhd.iommu_info;
 		ivrs->ivhd.iommu_feature_info =
-			ivrs_agesa->ivhd.iommu_feature_info & 0x7fe000;
+			ivrs_agesa->ivhd.iommu_feature_info;
 	} else {
 		printk(BIOS_WARNING, "%s: AGESA returned NULL IVRS\n", __func__);
 
 		return (unsigned long)ivrs;
 	}
 
-	/* Describe HPET */
-	p = (uint8_t *)current;
-	p[0] = 0x48;			/* Entry type */
-	p[1] = 0;			/* Device */
-	p[2] = 0;			/* Bus */
-	p[3] = 0xd7;			/* Data */
-	p[4] = 0x0;			/* HPET number */
-	p[5] = 0x14 << 3;		/* HPET device */
-	p[6] = nb_dev->bus->secondary;	/* HPET bus */
-	p[7] = 0x2;			/* Variety */
-	ivrs->ivhd.length += 8;
-	current += 8;
+	/*
+	 * Add all possible PCI devices on bus 0 that can generate transactions
+	 * processed by IOMMU. Start with device 00:01.0 since IOMMU does not
+	 * translate transactions generated by itself.
+	 */
+	current = ivhd_generic_range(ivrs, current, PCI_DEVFN(1, 0),
+				     PCI_DEVFN(0x1f, 7), 0);
 
 	/* Describe PCI devices */
-	int8_t root_level = -1;
-	add_ivrs_device_entries(NULL, all_devices, 0, -1, &root_level, &current,
+	add_ivhd_device_entries(NULL, all_devices, 0, -1, NULL, &current,
 				&ivrs->ivhd.length);
 
+	/* Describe HPET */
+	current = ivhd_describe_hpet(ivrs, current);
+
 	/* Describe IOAPICs */
-	unsigned long prev_current = current;
 	current = acpi_fill_ivrs_ioapic(ivrs, current);
-	ivrs->ivhd.length += (current - prev_current);
 
 	return current;
 }
